@@ -5,5 +5,5 @@ plotly
 scikit-learn
 joblib
 openpyxl
-rdkit
+rdkit-pypi
 Pillow
