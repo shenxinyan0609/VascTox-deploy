@@ -1,380 +1,863 @@
-# -*- coding: utf-8 -*-
+# app.py
+# VascTox: Vascular Toxicity Prediction Platform
+# Final deployed model: MorganFP-RF
+# Feature: Morgan fingerprint, radius=2, nBits=2048
+# AD: Morgan fingerprint-based Tanimoto nearest-neighbor similarity
 
+import os
 import io
+import warnings
 from pathlib import Path
 
-import joblib
+warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from rdkit import Chem, DataStructs
-from rdkit.Chem import Draw, Descriptors, Crippen, rdMolDescriptors
-from rdkit import RDLogger
+from rdkit.Chem import AllChem, Descriptors, Draw
 
-RDLogger.DisableLog("rdApp.*")
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    matthews_corrcoef,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    roc_curve,
+    precision_recall_curve,
+)
 
-
-try:
-    from rdkit.Chem import rdFingerprintGenerator
-
-    MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
-        radius=2,
-        fpSize=2048
-    )
-
-    def mol_to_fp(mol):
-        return MORGAN_GENERATOR.GetFingerprint(mol)
-
-except ImportError:
-    from rdkit.Chem import AllChem
-
-    def mol_to_fp(mol):
-        return AllChem.GetMorganFingerprintAsBitVect(
-            mol,
-            radius=2,
-            nBits=2048
-        )
+import joblib
 
 
-# =========================================================
-# 1. Path settings
-# =========================================================
-BASE_DIR = Path(__file__).resolve().parent
+# ============================================================
+# 1. Page config
+# ============================================================
 
-TRAIN_PATH = BASE_DIR / "train.xlsx"
-TEST_PATH = BASE_DIR / "test.xlsx"
-
-PROJECT_DIR = BASE_DIR
-MODEL_PATH = PROJECT_DIR / "models" / "best_model.pkl"
-MODEL_INFO_PATH = PROJECT_DIR / "models" / "best_model_info.json"
-
-AD_RESULT_PATH = PROJECT_DIR / "data" / "AD_train_test_result_checked.xlsx"
-TOP20_PATH = PROJECT_DIR / "data" / "top20_toxic.csv"
-
-
-# =========================================================
-# 2. Page configuration
-# =========================================================
 st.set_page_config(
     page_title="VascTox",
-    page_icon="🧬",
-    layout="wide"
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
-# =========================================================
-# 3. Basic functions
-# =========================================================
-def standardize_smiles(smiles):
-    if pd.isna(smiles):
-        return None, None, None, "Empty SMILES"
+# ============================================================
+# 2. Basic configuration
+# ============================================================
 
-    smi = str(smiles).strip()
+APP_TITLE = "VascTox"
+APP_VERSION = "VascTox v1.0"
 
-    if smi == "":
-        return None, None, None, "Empty SMILES"
+APP_DIR = Path(__file__).resolve().parent
 
-    mol = Chem.MolFromSmiles(smi)
+# 你的网站文件夹里现在有 train_vascular.csv / test_vascular.csv
+# 如果以后你把数据移到 data 文件夹，这里也能自动识别
+TRAIN_FILE_ROOT = APP_DIR / "train_vascular.csv"
+TEST_FILE_ROOT = APP_DIR / "test_vascular.csv"
 
-    if mol is None:
-        return None, None, None, "Invalid SMILES"
+TRAIN_FILE_DATA = APP_DIR / "data" / "train_vascular.csv"
+TEST_FILE_DATA = APP_DIR / "data" / "test_vascular.csv"
 
-    canonical_smiles = Chem.MolToSmiles(
-        mol,
-        canonical=True,
-        isomericSmiles=True
+TRAIN_FILE = TRAIN_FILE_DATA if TRAIN_FILE_DATA.exists() else TRAIN_FILE_ROOT
+TEST_FILE = TEST_FILE_DATA if TEST_FILE_DATA.exists() else TEST_FILE_ROOT
+
+MODEL_DIR = APP_DIR / "models"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+MODEL_FILE = MODEL_DIR / "morganfp_rf_model.joblib"
+METRICS_FILE = MODEL_DIR / "morganfp_rf_test_metrics.csv"
+TEST_PRED_FILE = MODEL_DIR / "morganfp_rf_test_predictions.csv"
+AD_SUMMARY_FILE = MODEL_DIR / "morgan_tanimoto_ad_summary.csv"
+
+RANDOM_STATE = 42
+MORGAN_RADIUS = 2
+MORGAN_NBITS = 2048
+PREDICTION_THRESHOLD = 0.50
+
+# 如果你想强制重新训练模型，把这里改成 True
+FORCE_RETRAIN = False
+
+
+# ============================================================
+# 3. UI styling
+# ============================================================
+
+def inject_custom_css():
+    st.markdown(
+        """
+<style>
+/* Global */
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+.block-container {
+    padding-top: 2.0rem;
+    padding-bottom: 3.0rem;
+    max-width: 1320px;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #eef6ff 0%, #f8fbff 100%);
+    border-right: 1px solid #dbeafe;
+}
+
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    color: #0f172a;
+}
+
+/* Hero */
+.hero-card {
+    padding: 34px 38px;
+    border-radius: 28px;
+    background: linear-gradient(135deg, #0f766e 0%, #0f4c81 55%, #111827 100%);
+    color: white;
+    box-shadow: 0 20px 50px rgba(15, 76, 129, 0.20);
+    margin-bottom: 28px;
+}
+
+.hero-card h1 {
+    font-size: 3.15rem;
+    font-weight: 850;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.045em;
+}
+
+.hero-card h2 {
+    font-size: 1.48rem;
+    font-weight: 650;
+    margin: 0 0 18px 0;
+    opacity: 0.96;
+}
+
+.hero-card p {
+    font-size: 1.02rem;
+    line-height: 1.65;
+    max-width: 1080px;
+    margin: 0;
+    color: rgba(255, 255, 255, 0.88);
+}
+
+.tag-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+}
+
+.tag {
+    display: inline-block;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.14);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: white;
+    font-size: 0.86rem;
+}
+
+/* Metric cards */
+.metric-card {
+    padding: 22px 22px 18px 22px;
+    border-radius: 21px;
+    background: #ffffff;
+    border: 1px solid #e5edf5;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+    min-height: 126px;
+    margin-bottom: 12px;
+}
+
+.metric-card .label {
+    color: #64748b;
+    font-size: 0.88rem;
+    font-weight: 650;
+    margin-bottom: 8px;
+}
+
+.metric-card .value {
+    color: #0f172a;
+    font-size: 2.05rem;
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+}
+
+.metric-card .note {
+    margin-top: 10px;
+    color: #64748b;
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+.metric-card.blue {
+    border: 1px solid #bfdbfe;
+    background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+}
+
+.metric-card.green {
+    border: 1px solid #bbf7d0;
+    background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+}
+
+.metric-card.amber {
+    border: 1px solid #fde68a;
+    background: linear-gradient(180deg, #fffbeb 0%, #ffffff 100%);
+}
+
+.metric-card.red {
+    border: 1px solid #fecaca;
+    background: linear-gradient(180deg, #fef2f2 0%, #ffffff 100%);
+}
+
+/* Section titles */
+.section-title {
+    margin-top: 34px;
+    margin-bottom: 16px;
+}
+
+.section-title h3 {
+    font-size: 1.45rem;
+    font-weight: 780;
+    color: #0f172a;
+    margin-bottom: 4px;
+}
+
+.section-title p {
+    color: #64748b;
+    margin-top: 0;
+    font-size: 0.96rem;
+}
+
+/* Workflow */
+.workflow-box {
+    padding: 22px;
+    border-radius: 21px;
+    background: #ffffff;
+    border: 1px solid #e5edf5;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+}
+
+.workflow-line {
+    font-weight: 700;
+    color: #075985;
+    font-size: 0.98rem;
+    line-height: 1.75;
+}
+
+/* Info panels */
+.info-panel {
+    padding: 18px 20px;
+    border-radius: 18px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    color: #334155;
+    line-height: 1.65;
+    margin-bottom: 14px;
+}
+
+.success-panel {
+    padding: 18px 20px;
+    border-radius: 18px;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #14532d;
+    line-height: 1.65;
+    margin-bottom: 14px;
+}
+
+.warning-panel {
+    padding: 18px 20px;
+    border-radius: 18px;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #78350f;
+    line-height: 1.65;
+    margin-bottom: 14px;
+}
+
+.danger-panel {
+    padding: 18px 20px;
+    border-radius: 18px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #7f1d1d;
+    line-height: 1.65;
+    margin-bottom: 14px;
+}
+
+/* Tables */
+[data-testid="stDataFrame"] {
+    border-radius: 16px;
+    overflow: hidden;
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: 999px;
+    padding: 0.55rem 1.3rem;
+    font-weight: 700;
+    border: 1px solid #0f766e;
+    background: linear-gradient(135deg, #0f766e 0%, #0f4c81 100%);
+    color: white;
+}
+
+.stDownloadButton > button {
+    border-radius: 999px;
+    padding: 0.55rem 1.2rem;
+    font-weight: 700;
+}
+
+/* Hide Streamlit default footer */
+footer {
+    visibility: hidden;
+}
+</style>
+        """,
+        unsafe_allow_html=True
     )
 
-    fp = mol_to_fp(mol)
 
-    return canonical_smiles, mol, fp, "Valid"
-
-
-def calc_basic_descriptors(mol):
-    return {
-        "MolWt": round(Descriptors.MolWt(mol), 3),
-        "LogP": round(Crippen.MolLogP(mol), 3),
-        "TPSA": round(rdMolDescriptors.CalcTPSA(mol), 3),
-        "NumHDonors": rdMolDescriptors.CalcNumHBD(mol),
-        "NumHAcceptors": rdMolDescriptors.CalcNumHBA(mol),
-        "NumRotatableBonds": rdMolDescriptors.CalcNumRotatableBonds(mol),
-        "RingCount": rdMolDescriptors.CalcNumRings(mol),
-        "HeavyAtomCount": mol.GetNumHeavyAtoms()
-    }
+def section_title(title, subtitle=None):
+    subtitle_html = f"<p>{subtitle}</p>" if subtitle else ""
+    st.markdown(
+        f"""
+<div class="section-title">
+    <h3>{title}</h3>
+    {subtitle_html}
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
-def get_risk_level(prob):
-    if prob is None:
-        return "Not available"
+def metric_card(label, value, note="", style=""):
+    st.markdown(
+        f"""
+<div class="metric-card {style}">
+    <div class="label">{label}</div>
+    <div class="value">{value}</div>
+    <div class="note">{note}</div>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    if prob >= 0.80:
-        return "High risk"
-    elif prob >= 0.50:
-        return "Moderate risk"
+
+def info_panel(text, panel_type="info"):
+    cls = {
+        "info": "info-panel",
+        "success": "success-panel",
+        "warning": "warning-panel",
+        "danger": "danger-panel",
+    }.get(panel_type, "info-panel")
+
+    st.markdown(
+        f"""
+<div class="{cls}">
+{text}
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+inject_custom_css()
+
+
+# ============================================================
+# 4. Data utilities
+# ============================================================
+
+def read_table(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    suffix = path.suffix.lower()
+
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    elif suffix in [".xlsx", ".xls"]:
+        return pd.read_excel(path)
     else:
-        return "Low risk"
+        raise ValueError(f"Unsupported file type: {path}")
 
 
-@st.cache_data
-def load_ad_summary():
-    if not AD_RESULT_PATH.exists():
-        return None
+def auto_find_columns(df: pd.DataFrame, require_label=True):
+    smiles_candidates = [
+        "SMILES", "smiles", "Smiles", "canonical_smiles", "Canonical_SMILES",
+        "CanonicalSmiles", "canonical_smile", "structure", "Structure"
+    ]
 
+    label_candidates = [
+        "Label", "label", "Y", "y", "Class", "class", "Toxic", "toxic",
+        "Toxicity", "toxicity", "Activity", "activity"
+    ]
+
+    smiles_col = None
+    label_col = None
+
+    for c in smiles_candidates:
+        if c in df.columns:
+            smiles_col = c
+            break
+
+    for c in label_candidates:
+        if c in df.columns:
+            label_col = c
+            break
+
+    if smiles_col is None:
+        raise ValueError(
+            "Cannot identify SMILES column. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    if require_label and label_col is None:
+        raise ValueError(
+            "Cannot identify label column. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    return smiles_col, label_col
+
+
+def canonicalize_smiles(smiles):
     try:
-        summary_df = pd.read_excel(AD_RESULT_PATH, sheet_name="AD_summary")
-        return summary_df
+        mol = Chem.MolFromSmiles(str(smiles))
+        if mol is None:
+            return None
+        return Chem.MolToSmiles(mol, canonical=True)
     except Exception:
         return None
 
 
-def get_ad_threshold():
-    summary_df = load_ad_summary()
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    smiles_col, label_col = auto_find_columns(df, require_label=True)
 
-    if summary_df is not None and "AD_threshold" in summary_df.columns:
-        try:
-            return float(summary_df["AD_threshold"].iloc[0])
-        except Exception:
-            pass
+    out = df.copy()
+    out["SMILES"] = out[smiles_col].apply(canonicalize_smiles)
+    out = out.dropna(subset=["SMILES"])
 
-    return 0.375000
+    out["Label"] = out[label_col].astype(int)
+    out = out[out["Label"].isin([0, 1])]
 
+    conflict = out.groupby("SMILES")["Label"].nunique()
+    conflict_smiles = conflict[conflict > 1].index.tolist()
 
-def get_metric_from_summary(column_name, default_value="NA"):
-    summary_df = load_ad_summary()
+    if len(conflict_smiles) > 0:
+        out = out[~out["SMILES"].isin(conflict_smiles)]
 
-    if summary_df is not None and column_name in summary_df.columns:
-        try:
-            value = summary_df[column_name].iloc[0]
-            return value
-        except Exception:
-            return default_value
+    out = out.drop_duplicates(subset=["SMILES", "Label"]).reset_index(drop=True)
 
-    return default_value
+    return out[["SMILES", "Label"]]
 
 
-@st.cache_resource
-def load_train_reference():
-    if not TRAIN_PATH.exists():
-        return None, None, None, "Training file not found"
+# ============================================================
+# 5. Morgan fingerprint and molecule utilities
+# ============================================================
 
-    train_df = pd.read_excel(TRAIN_PATH)
-
-    if "SMILES" not in train_df.columns:
-        return None, None, None, "The training set does not contain a SMILES column"
-
-    if "Label" not in train_df.columns:
-        train_df["Label"] = np.nan
-
-    canonical_list = []
-    label_list = []
-    fp_list = []
-
-    for _, row in train_df.iterrows():
-        canonical_smiles, mol, fp, status = standardize_smiles(row["SMILES"])
-
-        if status == "Valid":
-            canonical_list.append(canonical_smiles)
-            label_list.append(row["Label"])
-            fp_list.append(fp)
-
-    if len(fp_list) == 0:
-        return None, None, None, "No valid SMILES found in the training set"
-
-    return canonical_list, label_list, fp_list, "OK"
+def mol_from_smiles(smiles):
+    try:
+        return Chem.MolFromSmiles(str(smiles))
+    except Exception:
+        return None
 
 
-@st.cache_resource
-def load_prediction_model():
-    if MODEL_PATH.exists():
-        try:
-            model_package = joblib.load(MODEL_PATH)
-            return model_package, "OK"
-        except Exception as e:
-            return None, f"Failed to load model: {e}"
+def smiles_to_morgan_fp_bitvect(smiles, radius=MORGAN_RADIUS, nbits=MORGAN_NBITS):
+    mol = mol_from_smiles(smiles)
 
-    return None, "Model file not found"
+    if mol is None:
+        return None
+
+    fp = AllChem.GetMorganFingerprintAsBitVect(
+        mol,
+        radius,
+        nBits=nbits
+    )
+
+    return fp
 
 
-def calculate_ad(fp):
-    train_smiles, train_labels, train_fps, status = load_train_reference()
-    ad_threshold = get_ad_threshold()
+def bitvect_to_numpy(fp, nbits=MORGAN_NBITS):
+    arr = np.zeros((nbits,), dtype=np.int8)
+    DataStructs.ConvertToNumpyArray(fp, arr)
+    return arr
 
-    if status != "OK":
-        return {
-            "AD_max_Tanimoto": None,
-            "AD_status": "Not available",
-            "nearest_train_SMILES": None,
-            "nearest_train_Label": None,
-            "AD_message": status
-        }
 
-    sims = list(DataStructs.BulkTanimotoSimilarity(fp, train_fps))
-    nearest_idx = int(np.argmax(sims))
-    max_sim = float(sims[nearest_idx])
+def smiles_to_morgan_array(smiles):
+    fp = smiles_to_morgan_fp_bitvect(smiles)
 
-    ad_status = "Inside AD" if max_sim >= ad_threshold else "Outside AD"
+    if fp is None:
+        return np.zeros((MORGAN_NBITS,), dtype=np.int8)
+
+    return bitvect_to_numpy(fp)
+
+
+def build_morgan_matrix(smiles_list):
+    return np.array([smiles_to_morgan_array(smi) for smi in smiles_list])
+
+
+def compute_basic_descriptors(smiles):
+    mol = mol_from_smiles(smiles)
+
+    if mol is None:
+        return None
 
     return {
-        "AD_max_Tanimoto": max_sim,
-        "AD_status": ad_status,
-        "nearest_train_SMILES": train_smiles[nearest_idx],
-        "nearest_train_Label": train_labels[nearest_idx],
-        "AD_message": "OK"
+        "Molecular weight": Descriptors.MolWt(mol),
+        "LogP": Descriptors.MolLogP(mol),
+        "TPSA": Descriptors.TPSA(mol),
+        "H-bond acceptors": Descriptors.NumHAcceptors(mol),
+        "H-bond donors": Descriptors.NumHDonors(mol),
+        "Rotatable bonds": Descriptors.NumRotatableBonds(mol),
+        "Ring count": Descriptors.RingCount(mol),
+        "Heavy atoms": Descriptors.HeavyAtomCount(mol),
+        "Fraction Csp3": Descriptors.FractionCSP3(mol),
     }
 
 
-def calc_descriptors_for_model(mol, model_package):
-    desc_names = model_package["desc_names"]
-    all_nan_cols = model_package["all_nan_cols"]
-    medians = model_package["medians"]
-    finite_cols = model_package["finite_cols"]
-    huge_cols = model_package["huge_cols"]
-    keep_cols = model_package["keep_cols"]
+# ============================================================
+# 6. Applicability domain
+# ============================================================
 
-    desc_func_dict = dict(Descriptors._descList)
+def compute_train_nn_distribution(train_fps):
+    nn_sims = []
 
-    values = []
+    for i, fp in enumerate(train_fps):
+        sims = list(DataStructs.BulkTanimotoSimilarity(fp, train_fps))
+        sims[i] = -1.0
+        nn_sims.append(max(sims))
 
-    for name in desc_names:
-        func = desc_func_dict.get(name)
-
-        if func is None:
-            values.append(np.nan)
-            continue
-
-        try:
-            v = func(mol)
-            if v is None or isinstance(v, str):
-                v = np.nan
-            else:
-                v = float(v)
-        except Exception:
-            v = np.nan
-
-        values.append(v)
-
-    desc_df = pd.DataFrame([values], columns=desc_names, dtype=np.float64)
-
-    desc_df = desc_df.replace([np.inf, -np.inf], np.nan)
-    desc_df = desc_df.drop(columns=all_nan_cols, errors="ignore")
-    desc_df = desc_df.fillna(medians)
-    desc_df = desc_df.reindex(columns=finite_cols)
-    desc_df = desc_df.drop(columns=huge_cols, errors="ignore")
-    desc_df = desc_df.reindex(columns=keep_cols)
-
-    try:
-        desc_df = desc_df.fillna(pd.Series(medians).reindex(keep_cols))
-    except Exception:
-        pass
-
-    desc_df = desc_df.fillna(0)
-
-    X = desc_df.values.astype(np.float64)
-
-    return X
+    return np.array(nn_sims)
 
 
-def predict_toxicity(mol):
-    model_package, status = load_prediction_model()
+def compute_ad_cutoff(train_fps):
+    train_nn = compute_train_nn_distribution(train_fps)
+    cutoff = float(np.percentile(train_nn, 5))
+    return cutoff, train_nn
 
-    if status != "OK":
+
+def assess_ad(smiles, train_fps, cutoff):
+    fp = smiles_to_morgan_fp_bitvect(smiles)
+
+    if fp is None:
         return {
-            "Pred_probability": None,
-            "Pred_label": "Model not loaded",
-            "Risk_level": "Not available",
-            "Pred_message": status
+            "Nearest_Tanimoto": np.nan,
+            "Inside_AD": False,
+            "AD_Status": "Invalid SMILES"
         }
 
-    try:
-        if not isinstance(model_package, dict):
-            return {
-                "Pred_probability": None,
-                "Pred_label": "Unsupported model",
-                "Risk_level": "Not available",
-                "Pred_message": "best_model.pkl is not a Descriptors-RF model package."
-            }
+    sims = DataStructs.BulkTanimotoSimilarity(fp, train_fps)
+    nearest = float(max(sims)) if len(sims) > 0 else np.nan
+    inside = bool(nearest >= cutoff)
 
-        if model_package.get("model_type") != "Descriptors-RF":
-            return {
-                "Pred_probability": None,
-                "Pred_label": "Unsupported model",
-                "Risk_level": "Not available",
-                "Pred_message": f"Current model type is {model_package.get('model_type')}, not Descriptors-RF."
-            }
-
-        model = model_package["model"]
-        X = calc_descriptors_for_model(mol, model_package)
-
-        prob = float(model.predict_proba(X)[0][1])
-
-        threshold = model_package.get("classification_threshold", 0.5)
-
-        pred_label = "Vascular toxicant" if prob >= threshold else "Non-toxic"
-        risk_level = get_risk_level(prob)
-
-        return {
-            "Pred_probability": prob,
-            "Pred_label": pred_label,
-            "Risk_level": risk_level,
-            "Pred_message": "OK"
-        }
-
-    except Exception as e:
-        return {
-            "Pred_probability": None,
-            "Pred_label": "Prediction failed",
-            "Risk_level": "Not available",
-            "Pred_message": str(e)
-        }
+    return {
+        "Nearest_Tanimoto": nearest,
+        "Inside_AD": inside,
+        "AD_Status": "Inside AD" if inside else "Outside AD"
+    }
 
 
-def analyze_one_smiles(smiles):
-    canonical_smiles, mol, fp, status = standardize_smiles(smiles)
+# ============================================================
+# 7. Model and metrics
+# ============================================================
+
+def train_morgan_rf(X_train, y_train):
+    model = RandomForestClassifier(
+        n_estimators=500,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+        n_jobs=-1
+    )
+
+    model.fit(X_train, y_train)
+
+    return model
+
+
+def calculate_metrics(y_true, y_prob, threshold=PREDICTION_THRESHOLD):
+    y_pred = (y_prob >= threshold).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+
+    se = tp / (tp + fn) if (tp + fn) > 0 else np.nan
+    sp = tn / (tn + fp) if (tn + fp) > 0 else np.nan
+
+    metrics = {
+        "ROC-AUC": roc_auc_score(y_true, y_prob),
+        "PR-AUC": average_precision_score(y_true, y_prob),
+        "ACC": accuracy_score(y_true, y_pred),
+        "MCC": matthews_corrcoef(y_true, y_pred),
+        "F1": f1_score(y_true, y_pred, zero_division=0),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "SE": se,
+        "SP": sp,
+        "TN": int(tn),
+        "FP": int(fp),
+        "FN": int(fn),
+        "TP": int(tp),
+        "Threshold": threshold,
+    }
+
+    return metrics, y_pred
+
+
+@st.cache_resource
+def load_all_resources():
+    train_raw = read_table(TRAIN_FILE)
+    test_raw = read_table(TEST_FILE)
+
+    train_df = clean_dataset(train_raw)
+    test_df = clean_dataset(test_raw)
+
+    X_train = build_morgan_matrix(train_df["SMILES"].tolist())
+    y_train = train_df["Label"].values
+
+    X_test = build_morgan_matrix(test_df["SMILES"].tolist())
+    y_test = test_df["Label"].values
+
+    train_fps = [
+        smiles_to_morgan_fp_bitvect(smi)
+        for smi in train_df["SMILES"].tolist()
+    ]
+    train_fps = [fp for fp in train_fps if fp is not None]
+
+    if FORCE_RETRAIN or (not MODEL_FILE.exists()):
+        model = train_morgan_rf(X_train, y_train)
+        joblib.dump(model, MODEL_FILE)
+    else:
+        model = joblib.load(MODEL_FILE)
+
+    test_prob = model.predict_proba(X_test)[:, 1]
+    metrics, test_pred = calculate_metrics(y_test, test_prob)
+
+    metrics_df = pd.DataFrame([metrics])
+    metrics_df.to_csv(METRICS_FILE, index=False, encoding="utf-8-sig")
+
+    ad_cutoff, train_nn = compute_ad_cutoff(train_fps)
+
+    ad_records = []
+    for smi in test_df["SMILES"]:
+        ad_records.append(assess_ad(smi, train_fps, ad_cutoff))
+
+    ad_df = pd.DataFrame(ad_records)
+
+    test_result = test_df.copy()
+    test_result["Toxicity_Risk_Score"] = test_prob
+    test_result["Predicted_Label"] = test_pred
+    test_result["Predicted_Class"] = np.where(test_pred == 1, "Toxic", "Non-toxic")
+    test_result["Nearest_Tanimoto"] = ad_df["Nearest_Tanimoto"]
+    test_result["Inside_AD"] = ad_df["Inside_AD"]
+    test_result["AD_Status"] = ad_df["AD_Status"]
+
+    test_result.to_csv(TEST_PRED_FILE, index=False, encoding="utf-8-sig")
+
+    ad_summary = pd.DataFrame({
+        "AD_cutoff": [ad_cutoff],
+        "Test_inside_AD_ratio": [test_result["Inside_AD"].mean()],
+        "Train_molecules": [len(train_df)],
+        "Test_molecules": [len(test_df)]
+    })
+
+    ad_summary.to_csv(AD_SUMMARY_FILE, index=False, encoding="utf-8-sig")
+
+    return {
+        "train_df": train_df,
+        "test_df": test_df,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+        "model": model,
+        "train_fps": train_fps,
+        "train_nn": train_nn,
+        "ad_cutoff": ad_cutoff,
+        "metrics": metrics,
+        "test_result": test_result,
+        "test_prob": test_prob,
+    }
+
+
+def predict_one_smiles(smiles, model, train_fps, ad_cutoff):
+    can_smi = canonicalize_smiles(smiles)
+
+    if can_smi is None:
+        return None
+
+    x = smiles_to_morgan_array(can_smi).reshape(1, -1)
+    prob = float(model.predict_proba(x)[0, 1])
+    pred = int(prob >= PREDICTION_THRESHOLD)
+
+    ad_info = assess_ad(can_smi, train_fps, ad_cutoff)
+    desc = compute_basic_descriptors(can_smi)
 
     result = {
-        "Input_SMILES": smiles,
-        "Canonical_SMILES": canonical_smiles,
-        "SMILES_status": status
+        "SMILES": can_smi,
+        "Toxicity_Risk_Score": prob,
+        "Predicted_Label": pred,
+        "Predicted_Class": "Toxic" if pred == 1 else "Non-toxic",
+        "Threshold": PREDICTION_THRESHOLD,
+        **ad_info
     }
 
-    if status != "Valid":
-        result.update({
-            "Pred_probability": None,
-            "Pred_label": "Invalid",
-            "Risk_level": "Not available",
-            "Pred_message": "Invalid SMILES",
-            "AD_max_Tanimoto": None,
-            "AD_status": "Not available",
-            "nearest_train_SMILES": None,
-            "nearest_train_Label": None,
-            "AD_message": "Invalid SMILES"
-        })
-        return result, mol
+    if desc is not None:
+        result.update(desc)
 
-    pred_result = predict_toxicity(mol)
-    ad_result = calculate_ad(fp)
-
-    result.update(pred_result)
-    result.update(ad_result)
-
-    return result, mol
+    return result
 
 
-def display_molecule(mol, title="Molecular structure"):
-    if mol is None:
-        st.warning("Unable to display molecular structure.")
-        return
+# ============================================================
+# 8. Plotting
+# ============================================================
 
-    img = Draw.MolToImage(mol, size=(420, 300))
-    st.image(img, caption=title)
+def plot_roc(y_true, y_prob):
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    auc_value = roc_auc_score(y_true, y_prob)
+
+    fig, ax = plt.subplots(figsize=(5.6, 4.5))
+    ax.plot(fpr, tpr, linewidth=2.3, label=f"ROC-AUC = {auc_value:.3f}")
+    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC curve")
+    ax.legend()
+    fig.tight_layout()
+
+    return fig
 
 
-# =========================================================
-# 4. Sidebar
-# =========================================================
-st.sidebar.title("VascTox")
+def plot_pr(y_true, y_prob):
+    precision, recall, _ = precision_recall_curve(y_true, y_prob)
+    ap_value = average_precision_score(y_true, y_prob)
+
+    fig, ax = plt.subplots(figsize=(5.6, 4.5))
+    ax.plot(recall, precision, linewidth=2.3, label=f"PR-AUC = {ap_value:.3f}")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall curve")
+    ax.legend()
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_cm(metrics):
+    cm = np.array([
+        [metrics["TN"], metrics["FP"]],
+        [metrics["FN"], metrics["TP"]]
+    ])
+
+    fig, ax = plt.subplots(figsize=(5.2, 4.5))
+    ax.imshow(cm)
+
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
+    ax.set_xticklabels(["Pred 0\nNon-toxic", "Pred 1\nToxic"])
+    ax.set_yticklabels(["True 0\nNon-toxic", "True 1\nToxic"])
+
+    total = cm.sum()
+
+    for i in range(2):
+        for j in range(2):
+            value = cm[i, j]
+            percent = value / total * 100
+            ax.text(
+                j,
+                i,
+                f"{value}\n{percent:.1f}%",
+                ha="center",
+                va="center",
+                fontsize=12
+            )
+
+    ax.set_title("Confusion matrix")
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_ad_distribution(train_nn, ad_cutoff):
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.hist(train_nn, bins=40, alpha=0.85)
+    ax.axvline(
+        ad_cutoff,
+        linestyle="--",
+        linewidth=2,
+        label=f"AD cutoff = {ad_cutoff:.4f}"
+    )
+    ax.set_xlabel("Training nearest-neighbor Tanimoto similarity")
+    ax.set_ylabel("Count")
+    ax.set_title("Morgan-Tanimoto AD cutoff")
+    ax.legend()
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_risk_histogram(test_result):
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+
+    toxic_scores = test_result.loc[test_result["Label"] == 1, "Toxicity_Risk_Score"]
+    nontoxic_scores = test_result.loc[test_result["Label"] == 0, "Toxicity_Risk_Score"]
+
+    ax.hist(nontoxic_scores, bins=35, alpha=0.65, label="Non-toxic")
+    ax.hist(toxic_scores, bins=35, alpha=0.65, label="Toxic")
+    ax.axvline(PREDICTION_THRESHOLD, linestyle="--", linewidth=2, label="Threshold = 0.50")
+
+    ax.set_xlabel("Toxicity risk score")
+    ax.set_ylabel("Count")
+    ax.set_title("Risk score distribution")
+    ax.legend()
+    fig.tight_layout()
+
+    return fig
+
+
+def dataframe_to_csv_download(df):
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+# ============================================================
+# 9. Load resources
+# ============================================================
+
+try:
+    resources = load_all_resources()
+except Exception as e:
+    st.error("Failed to load the VascTox resources.")
+    st.exception(e)
+    st.stop()
+
+train_df = resources["train_df"]
+test_df = resources["test_df"]
+model = resources["model"]
+train_fps = resources["train_fps"]
+train_nn = resources["train_nn"]
+ad_cutoff = resources["ad_cutoff"]
+metrics = resources["metrics"]
+test_result = resources["test_result"]
+y_test = resources["y_test"]
+test_prob = resources["test_prob"]
+
+
+# ============================================================
+# 10. Sidebar
+# ============================================================
+
+st.sidebar.title(APP_TITLE)
 st.sidebar.caption("Vascular Toxicity Prediction and Applicability Domain Assessment")
 
 page = st.sidebar.radio(
@@ -383,513 +866,707 @@ page = st.sidebar.radio(
         "Overview",
         "Single Prediction",
         "Batch Prediction",
-        "Applicability Domain Analysis",
+        "Applicability Domain",
         "High-Risk Molecules",
+        "Model Details",
         "About"
     ]
 )
 
-st.sidebar.divider()
-st.sidebar.write("Current project files:")
-st.sidebar.code(f"Training set: {TRAIN_PATH}")
-st.sidebar.code(f"AD result: {AD_RESULT_PATH}")
-st.sidebar.code(f"Model: {MODEL_PATH}")
+st.sidebar.markdown("---")
+st.sidebar.subheader("Model version")
+st.sidebar.info(APP_VERSION)
+
+st.sidebar.subheader("Current model")
+st.sidebar.markdown(
+    f"""
+**Prediction model:** MorganFP-RF
+
+**Input features:** Morgan fingerprints  
+radius = {MORGAN_RADIUS}, nBits = {MORGAN_NBITS}
+
+**AD method:** Morgan-Tanimoto nearest-neighbor similarity
+"""
+)
+
+st.sidebar.subheader("Use note")
+st.sidebar.caption(
+    "For research use only. The predicted risk score is not clinical, "
+    "regulatory, or experimental safety evidence. Predictions outside the "
+    "applicability domain should be interpreted cautiously."
+)
 
 
-# =========================================================
-# 5. Overview
-# =========================================================
+# ============================================================
+# 11. Page: Overview
+# ============================================================
+
 if page == "Overview":
+    st.markdown(
+        """
+<div class="hero-card">
+    <h1>VascTox</h1>
+    <h2>Vascular Toxicity Prediction Platform</h2>
+    <p>
+        VascTox is a machine-learning platform for small-molecule vascular toxicity
+        risk prediction. The current version uses a MorganFP-RF model and integrates
+        single-molecule prediction, batch SMILES screening, Morgan-Tanimoto applicability
+        domain assessment, and high-risk compound prioritization.
+    </p>
+    <div class="tag-row">
+        <span class="tag">MorganFP-RF</span>
+        <span class="tag">Binary vascular toxicity</span>
+        <span class="tag">Applicability domain</span>
+        <span class="tag">Batch screening</span>
+    </div>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    st.title("VascTox")
-    st.subheader("Vascular Toxicity Prediction Platform")
+    section_title(
+        "Dataset and Applicability Domain",
+        "Core information for the fixed 1:1 vascular toxicity dataset and Morgan-Tanimoto AD definition."
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Training molecules", f"{len(train_df)}", "Used to train the MorganFP-RF model.", "blue")
+    with c2:
+        metric_card("Test molecules", f"{len(test_df)}", "Held-out test set for model evaluation.", "blue")
+    with c3:
+        metric_card("AD cutoff", f"{ad_cutoff:.4f}", "5th percentile of training nearest-neighbor Tanimoto similarity.", "amber")
+    with c4:
+        metric_card("Test molecules inside AD", f"{test_result['Inside_AD'].mean() * 100:.1f}%", "Fraction of test molecules covered by the training chemical space.", "green")
+
+    section_title(
+        "Held-out Test Performance",
+        "Four core metrics are shown on the homepage. Detailed metrics are provided in the Model Details page."
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        metric_card("ROC-AUC", f"{metrics['ROC-AUC']:.4f}", "Overall ranking ability.", "green")
+    with m2:
+        metric_card("PR-AUC", f"{metrics['PR-AUC']:.4f}", "Toxic-class focused performance.", "green")
+    with m3:
+        metric_card("MCC", f"{metrics['MCC']:.4f}", "Balanced binary-classification quality.", "green")
+    with m4:
+        metric_card("F1 score", f"{metrics['F1']:.4f}", "Balance between precision and recall.", "blue")
+
+    with st.expander("Show detailed metrics"):
+        detail_df = pd.DataFrame([
+            {
+                "Metric": "Accuracy",
+                "Value": metrics["ACC"],
+                "Meaning": "Overall fraction of correct predictions"
+            },
+            {
+                "Metric": "Sensitivity / Recall",
+                "Value": metrics["SE"],
+                "Meaning": "Fraction of toxic molecules correctly identified"
+            },
+            {
+                "Metric": "Specificity",
+                "Value": metrics["SP"],
+                "Meaning": "Fraction of non-toxic molecules correctly identified"
+            },
+            {
+                "Metric": "Precision",
+                "Value": metrics["Precision"],
+                "Meaning": "Fraction of predicted toxic molecules that are truly toxic"
+            },
+            {
+                "Metric": "Decision threshold",
+                "Value": metrics["Threshold"],
+                "Meaning": "Risk score threshold used for binary classification"
+            },
+        ])
+        st.dataframe(detail_df, use_container_width=True)
+
+    section_title(
+        "Workflow",
+        "The prediction pipeline used by the deployed VascTox model."
+    )
 
     st.markdown(
         """
-        This platform supports small-molecule vascular toxicity prediction, batch SMILES analysis,
-        applicability domain assessment, and visualization of representative high-risk molecules.
-        """
+<div class="workflow-box">
+    <div class="workflow-line">
+        SMILES input → Molecular standardization → Morgan fingerprint calculation →
+        MorganFP-RF prediction → Morgan-Tanimoto AD assessment → Result interpretation
+    </div>
+</div>
+        """,
+        unsafe_allow_html=True
     )
 
-    ad_threshold = get_ad_threshold()
+   
 
-    train_count = get_metric_from_summary("train_valid_molecules", 3616)
-    test_count = get_metric_from_summary("test_valid_molecules", 904)
-    inside_ratio = get_metric_from_summary("inside_AD_ratio", None)
-    test_auc = get_metric_from_summary("test_AUC", None)
+    section_title("Performance Visualization")
 
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Training molecules", f"{int(train_count)}")
-    col2.metric("Test molecules", f"{int(test_count)}")
-    col3.metric("AD cutoff", f"{ad_threshold:.4f}")
-
-    if inside_ratio is not None and not pd.isna(inside_ratio):
-        col4.metric("Inside AD ratio", f"{float(inside_ratio) * 100:.1f}%")
-    else:
-        col4.metric("Inside AD ratio", "NA")
-
-    st.divider()
-
-    st.markdown("### Model Summary")
-
-    c1, c2, c3 = st.columns(3)
-
-    if test_auc is not None and not pd.isna(test_auc):
-        c1.metric("Test AUC", f"{float(test_auc):.4f}")
-    else:
-        c1.metric("Test AUC", "NA")
-
-    test_acc = get_metric_from_summary("test_ACC", None)
-    test_mcc = get_metric_from_summary("test_MCC", None)
-
-    if test_acc is not None and not pd.isna(test_acc):
-        c2.metric("Test ACC", f"{float(test_acc):.4f}")
-    else:
-        c2.metric("Test ACC", "NA")
-
-    if test_mcc is not None and not pd.isna(test_mcc):
-        c3.metric("Test MCC", f"{float(test_mcc):.4f}")
-    else:
-        c3.metric("Test MCC", "NA")
-
-    st.markdown("### Workflow")
-
-    st.markdown(
-        """
-        **SMILES input → Molecular standardization → RDKit descriptor calculation → Descriptors-RF prediction → Morgan-Tanimoto AD assessment → Result interpretation**
-        """
-    )
-
-    st.info(
-        "The current version uses a Descriptors-RF classifier trained on the fixed 1:1 vascular toxicity dataset under the single 10 µM criterion."
-    )
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.pyplot(plot_roc(y_test, test_prob))
+    with p2:
+        st.pyplot(plot_pr(y_test, test_prob))
+    with p3:
+        st.pyplot(plot_cm(metrics))
 
 
-# =========================================================
-# 6. Single Prediction
-# =========================================================
+# ============================================================
+# 12. Page: Single Prediction
+# ============================================================
+
 elif page == "Single Prediction":
+    st.title("Single-Molecule Prediction")
 
-    st.title("Single-Molecule Vascular Toxicity Prediction")
-
-    example_smiles = "CC(=O)Oc1ccccc1C(=O)O"
-
-    smiles = st.text_area(
-        "Enter a SMILES:",
-        value=example_smiles,
-        height=100
+    info_panel(
+        """
+        Enter one SMILES string. VascTox will standardize the molecule, calculate Morgan
+        fingerprints, predict vascular toxicity risk using MorganFP-RF, and assess whether
+        the molecule is inside the Morgan-Tanimoto applicability domain.
+        """,
+        "info"
     )
 
-    run_button = st.button("Run Analysis", type="primary")
+    example = "CC(=O)OC1=CC=CC=C1C(=O)O"
+
+    smiles_input = st.text_input(
+        "Input SMILES",
+        value=example,
+        help="Example shown: aspirin"
+    )
+
+    run_button = st.button("Predict molecule")
 
     if run_button:
+        result = predict_one_smiles(smiles_input, model, train_fps, ad_cutoff)
 
-        result, mol = analyze_one_smiles(smiles)
+        if result is None:
+            st.error("Invalid SMILES. Please check the input.")
+        else:
+            section_title("Prediction Result")
 
-        st.divider()
+            p1, p2, p3, p4 = st.columns(4)
 
-        left, right = st.columns([1.1, 1.2])
+            pred_style = "red" if result["Predicted_Label"] == 1 else "green"
+            ad_style = "green" if result["Inside_AD"] else "amber"
 
-        with left:
-            display_molecule(mol)
+            with p1:
+                metric_card("Predicted class", result["Predicted_Class"], "Binary prediction at threshold 0.50.", pred_style)
+            with p2:
+                metric_card("Risk score", f"{result['Toxicity_Risk_Score']:.4f}", "Model-derived toxicity risk score.", pred_style)
+            with p3:
+                metric_card("Nearest Tanimoto", f"{result['Nearest_Tanimoto']:.4f}", "Similarity to the nearest training molecule.", ad_style)
+            with p4:
+                metric_card("AD status", result["AD_Status"], "Inside or outside the Morgan-Tanimoto AD.", ad_style)
 
-            st.markdown("### Basic Molecular Properties")
+            if result["Predicted_Label"] == 1 and result["Inside_AD"]:
+                info_panel(
+                    """
+                    The molecule is predicted as <b>toxic</b> and is <b>inside</b> the
+                    applicability domain. This result may be prioritized for further
+                    experimental or literature validation.
+                    """,
+                    "warning"
+                )
+            elif result["Predicted_Label"] == 1 and not result["Inside_AD"]:
+                info_panel(
+                    """
+                    The molecule is predicted as <b>toxic</b>, but it is <b>outside</b>
+                    the applicability domain. Interpret the risk score cautiously.
+                    """,
+                    "warning"
+                )
+            elif result["Predicted_Label"] == 0 and result["Inside_AD"]:
+                info_panel(
+                    """
+                    The molecule is predicted as <b>non-toxic</b> and is <b>inside</b>
+                    the applicability domain.
+                    """,
+                    "success"
+                )
+            else:
+                info_panel(
+                    """
+                    The molecule is predicted as <b>non-toxic</b>, but it is <b>outside</b>
+                    the applicability domain. Interpret the prediction cautiously.
+                    """,
+                    "info"
+                )
 
+            section_title("Molecular Structure")
+
+            mol = Chem.MolFromSmiles(result["SMILES"])
             if mol is not None:
-                desc = calc_basic_descriptors(mol)
-                st.dataframe(
-                    pd.DataFrame([desc]).T.rename(columns={0: "Value"}),
-                    use_container_width=True
-                )
+                img = Draw.MolToImage(mol, size=(480, 330))
+                st.image(img)
 
-        with right:
-            st.markdown("### Prediction and AD Results")
+            section_title("Basic Molecular Descriptors")
 
-            st.write(f"**Canonical SMILES:** `{result['Canonical_SMILES']}`")
-            st.write(f"**SMILES status:** {result['SMILES_status']}")
+            desc_keys = [
+                "Molecular weight",
+                "LogP",
+                "TPSA",
+                "H-bond acceptors",
+                "H-bond donors",
+                "Rotatable bonds",
+                "Ring count",
+                "Heavy atoms",
+                "Fraction Csp3"
+            ]
 
-            pred_prob = result.get("Pred_probability")
+            desc_df = pd.DataFrame(
+                [{"Descriptor": k, "Value": result.get(k, np.nan)} for k in desc_keys]
+            )
 
-            if pred_prob is not None:
-                st.metric("Predicted Vascular Toxicity Probability", f"{pred_prob:.4f}")
-                st.write(f"**Predicted class:** {result['Pred_label']}")
-                st.write(f"**Risk level:** {result['Risk_level']}")
+            st.dataframe(desc_df, use_container_width=True)
 
-                if result["Pred_label"] == "Vascular toxicant":
-                    st.error("The model predicts that this molecule has vascular toxicity risk.")
-                else:
-                    st.success("The model predicts that this molecule is non-toxic under the current criterion.")
+            section_title("Full Output")
 
-            else:
-                st.warning(
-                    f"Model prediction failed: {result.get('Pred_message', 'Unknown error')}"
-                )
+            output_df = pd.DataFrame([result])
+            st.dataframe(output_df, use_container_width=True)
 
-            ad_sim = result.get("AD_max_Tanimoto")
-
-            if ad_sim is not None:
-                st.metric("AD Max Tanimoto Similarity", f"{ad_sim:.4f}")
-                st.write(f"**AD status:** {result['AD_status']}")
-                st.write(f"**Nearest training-set molecule:** `{result['nearest_train_SMILES']}`")
-                st.write(f"**Nearest training-set molecule label:** {result['nearest_train_Label']}")
-
-                if result["AD_status"] == "Inside AD":
-                    st.success(
-                        "This molecule is inside the model applicability domain, suggesting relatively higher prediction reliability."
-                    )
-                else:
-                    st.error(
-                        "This molecule is outside the model applicability domain; the prediction should be interpreted with caution."
-                    )
-
-            else:
-                st.warning(
-                    f"AD analysis failed: {result.get('AD_message', 'Unknown error')}"
-                )
+            st.download_button(
+                label="Download single prediction result",
+                data=dataframe_to_csv_download(output_df),
+                file_name="single_prediction_result.csv",
+                mime="text/csv"
+            )
 
 
-# =========================================================
-# 7. Batch Prediction
-# =========================================================
+# ============================================================
+# 13. Page: Batch Prediction
+# ============================================================
+
 elif page == "Batch Prediction":
-
     st.title("Batch SMILES Prediction")
 
-    st.markdown(
+    info_panel(
         """
-        Upload a CSV or Excel file. The file must contain at least one column named `SMILES`.
-        """
+        Upload a CSV file containing a SMILES column, or paste multiple SMILES strings
+        with one molecule per line. VascTox will return toxicity risk scores, predicted
+        classes, nearest Tanimoto similarity, and applicability domain status.
+        """,
+        "info"
     )
 
-    uploaded_file = st.file_uploader(
-        "Upload file",
-        type=["csv", "xlsx"]
-    )
+    mode = st.radio("Input mode", ["Paste SMILES", "Upload CSV"], horizontal=True)
 
-    if uploaded_file is not None:
+    input_df = None
 
-        try:
-            if uploaded_file.name.lower().endswith(".csv"):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+    if mode == "Paste SMILES":
+        text = st.text_area(
+            "Paste SMILES, one per line",
+            value="CC(=O)OC1=CC=CC=C1C(=O)O\nCCO\nc1ccccc1",
+            height=160
+        )
 
-            st.write("Uploaded file preview:")
-            st.dataframe(df.head(), use_container_width=True)
-
-            if "SMILES" not in df.columns:
-                st.error("The uploaded file does not contain a SMILES column.")
-
-            else:
-                if st.button("Run Batch Analysis", type="primary"):
-
-                    results = []
-
-                    for _, row in df.iterrows():
-                        result, mol = analyze_one_smiles(row["SMILES"])
-
-                        for col in df.columns:
-                            if col not in result and col != "SMILES":
-                                result[col] = row[col]
-
-                        results.append(result)
-
-                    result_df = pd.DataFrame(results)
-
-                    st.success("Batch analysis completed.")
-                    st.dataframe(result_df, use_container_width=True)
-
-                    csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
-
-                    st.download_button(
-                        label="Download CSV Results",
-                        data=csv_bytes,
-                        file_name="VascTox_batch_prediction.csv",
-                        mime="text/csv"
-                    )
-
-                    output = io.BytesIO()
-
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        result_df.to_excel(
-                            writer,
-                            index=False,
-                            sheet_name="prediction_result"
-                        )
-
-                    st.download_button(
-                        label="Download Excel Results",
-                        data=output.getvalue(),
-                        file_name="VascTox_batch_prediction.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-        except Exception as e:
-            st.error(f"File reading or analysis failed: {e}")
-
-
-# =========================================================
-# 8. Applicability Domain Analysis
-# =========================================================
-elif page == "Applicability Domain Analysis":
-
-    st.title("Applicability Domain Analysis")
-
-    st.markdown(
-        """
-        This module evaluates whether test-set molecules fall within the training-set chemical space based on Morgan fingerprints and Tanimoto similarity.
-        """
-    )
-
-    ad_threshold = get_ad_threshold()
-
-    test_count = get_metric_from_summary("test_valid_molecules", 904)
-    inside_count = get_metric_from_summary("inside_AD_count", "NA")
-    outside_count = get_metric_from_summary("outside_AD_count", "NA")
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("AD cutoff", f"{ad_threshold:.4f}")
-    col2.metric("Valid test molecules", f"{int(test_count)}")
-    col3.metric("Inside AD", f"{inside_count}")
-    col4.metric("Outside AD", f"{outside_count}")
-
-    st.divider()
-
-    if not AD_RESULT_PATH.exists():
-        st.error(f"AD result file not found: {AD_RESULT_PATH}")
+        if st.button("Run batch prediction"):
+            smiles_list = [x.strip() for x in text.splitlines() if x.strip()]
+            input_df = pd.DataFrame({"SMILES": smiles_list})
 
     else:
-        try:
-            summary_df = pd.read_excel(AD_RESULT_PATH, sheet_name="AD_summary")
-            test_ad_df = pd.read_excel(AD_RESULT_PATH, sheet_name="test_AD_result")
-            train_nn_df = pd.read_excel(AD_RESULT_PATH, sheet_name="train_NN_similarity")
+        uploaded = st.file_uploader("Upload CSV file", type=["csv"])
 
-            st.markdown("### AD Summary")
-            st.dataframe(summary_df, use_container_width=True)
+        if uploaded is not None:
+            raw = pd.read_csv(uploaded)
 
-            st.markdown("### Training-Set Nearest-Neighbor Tanimoto Similarity Distribution")
+            try:
+                smiles_col, _ = auto_find_columns(raw, require_label=False)
+                input_df = pd.DataFrame({"SMILES": raw[smiles_col].astype(str).tolist()})
+            except Exception:
+                st.error("Cannot identify a SMILES column in the uploaded CSV file.")
 
-            if "train_nearest_neighbor_similarity" in train_nn_df.columns:
-                fig1 = px.histogram(
-                    train_nn_df,
-                    x="train_nearest_neighbor_similarity",
-                    nbins=40,
-                    title="Training-set nearest-neighbor Tanimoto similarity"
-                )
-                fig1.add_vline(
-                    x=ad_threshold,
-                    line_dash="dash",
-                    annotation_text=f"AD cutoff = {ad_threshold:.4f}",
-                    annotation_position="top right"
-                )
-                st.plotly_chart(fig1, use_container_width=True)
+    if input_df is not None:
+        results = []
+        progress = st.progress(0)
 
-            st.markdown("### Test-Set Inside/Outside AD Distribution")
+        for i, smi in enumerate(input_df["SMILES"].tolist()):
+            res = predict_one_smiles(smi, model, train_fps, ad_cutoff)
 
-            if "AD_status" in test_ad_df.columns:
-                fig2 = px.histogram(
-                    test_ad_df,
-                    x="AD_status",
-                    title="Test-set AD distribution"
-                )
-                st.plotly_chart(fig2, use_container_width=True)
-
-            st.markdown("### Ranked AD_max_Tanimoto Values of Test Compounds")
-
-            if "AD_max_Tanimoto" in test_ad_df.columns:
-                temp_df = test_ad_df.copy()
-                temp_df = temp_df.sort_values("AD_max_Tanimoto").reset_index(drop=True)
-                temp_df["Index"] = np.arange(1, len(temp_df) + 1)
-
-                fig3 = px.scatter(
-                    temp_df,
-                    x="Index",
-                    y="AD_max_Tanimoto",
-                    color="AD_status",
-                    title="AD_max_Tanimoto values of test compounds"
-                )
-                fig3.add_hline(
-                    y=ad_threshold,
-                    line_dash="dash",
-                    annotation_text=f"AD cutoff = {ad_threshold:.4f}",
-                    annotation_position="top left"
-                )
-                st.plotly_chart(fig3, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"Failed to read AD results: {e}")
-
-
-# =========================================================
-# 9. High-Risk Molecules
-# =========================================================
-elif page == "High-Risk Molecules":
-
-    st.title("High-Risk Molecules")
-
-    st.markdown(
-        """
-        This page lists representative high-risk vascular toxicants predicted by the model
-        and provides molecular structure visualization.
-        """
-    )
-
-    st.divider()
-
-    st.markdown("### Top 20 Predicted High-Risk Molecules")
-
-    if TOP20_PATH.exists():
-        try:
-            top20_df = pd.read_csv(TOP20_PATH)
-
-            st.dataframe(top20_df, use_container_width=True)
-
-            if "SMILES" not in top20_df.columns:
-                st.error("The file top20_toxic.csv does not contain a SMILES column, so molecular structures cannot be rendered.")
-
+            if res is None:
+                results.append({
+                    "Input_SMILES": smi,
+                    "SMILES": None,
+                    "Toxicity_Risk_Score": np.nan,
+                    "Predicted_Label": np.nan,
+                    "Predicted_Class": "Invalid SMILES",
+                    "Nearest_Tanimoto": np.nan,
+                    "Inside_AD": False,
+                    "AD_Status": "Invalid SMILES"
+                })
             else:
-                st.markdown("### Molecular Structure Preview")
+                res["Input_SMILES"] = smi
+                results.append(res)
 
-                for i, row in top20_df.head(20).iterrows():
+            progress.progress((i + 1) / len(input_df))
 
-                    canonical_smiles, mol, fp, status = standardize_smiles(row["SMILES"])
+        result_df = pd.DataFrame(results)
 
-                    if status != "Valid":
-                        with st.expander(f"{i + 1}. Molecule_{i + 1} | Invalid SMILES"):
-                            st.warning(f"Invalid SMILES: {row['SMILES']}")
-                        continue
+        valid_df = result_df[result_df["Predicted_Class"] != "Invalid SMILES"]
 
-                    name = f"Molecule_{i + 1}"
+        section_title("Batch Prediction Summary")
 
-                    pred_prob = None
+        if len(valid_df) > 0:
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                metric_card("Total molecules", len(result_df), "Including invalid SMILES.", "blue")
+            with b2:
+                metric_card("Valid molecules", len(valid_df), "Successfully parsed by RDKit.", "blue")
+            with b3:
+                metric_card("Predicted toxic", int((valid_df["Predicted_Label"] == 1).sum()), "Risk score ≥ 0.50.", "amber")
+            with b4:
+                metric_card("Inside AD", f"{valid_df['Inside_AD'].mean() * 100:.1f}%", "Molecules inside Morgan-Tanimoto AD.", "green")
 
-                    if "Pred_Prob" in top20_df.columns:
-                        pred_prob = row.get("Pred_Prob")
-                    elif "Pred_probability" in top20_df.columns:
-                        pred_prob = row.get("Pred_probability")
-                    elif "pred_prob" in top20_df.columns:
-                        pred_prob = row.get("pred_prob")
-                    elif "probability" in top20_df.columns:
-                        pred_prob = row.get("probability")
+        section_title("Batch Prediction Results")
+        st.dataframe(result_df, use_container_width=True)
 
-                    if pred_prob is None or pd.isna(pred_prob):
-                        pred_prob_text = "NA"
-                    else:
-                        try:
-                            pred_prob_text = f"{float(pred_prob):.4f}"
-                        except Exception:
-                            pred_prob_text = str(pred_prob)
-
-                    expander_title = f"{i + 1}. {name} | Pred_Prob = {pred_prob_text}"
-
-                    with st.expander(expander_title):
-
-                        display_molecule(mol)
-
-                        st.write(f"**Canonical SMILES:** `{canonical_smiles}`")
-                        st.write(f"**Input SMILES:** `{row['SMILES']}`")
-
-                        if "Label" in top20_df.columns:
-                            st.write(f"**Original label:** {row.get('Label')}")
-                        elif "label" in top20_df.columns:
-                            st.write(f"**Original label:** {row.get('label')}")
-
-                        if "pred_label" in top20_df.columns:
-                            st.write(f"**Predicted label:** {row.get('pred_label')}")
-                        elif "Pred_Label" in top20_df.columns:
-                            st.write(f"**Predicted label:** {row.get('Pred_Label')}")
-
-                        if pred_prob_text != "NA":
-                            st.write(f"**Predicted probability:** {pred_prob_text}")
-
-                        if "cc50_uM" in top20_df.columns:
-                            st.write(f"**CC50 / µM:** {row.get('cc50_uM')}")
-
-                        if "AD_status" in top20_df.columns:
-                            st.write(f"**AD status:** {row.get('AD_status')}")
-
-                        if "AD_max_Tanimoto" in top20_df.columns:
-                            try:
-                                st.write(f"**AD max Tanimoto:** {float(row.get('AD_max_Tanimoto')):.4f}")
-                            except Exception:
-                                st.write(f"**AD max Tanimoto:** {row.get('AD_max_Tanimoto')}")
-
-                        if "nearest_train_SMILES" in top20_df.columns:
-                            st.write(f"**Nearest training-set molecule:** `{row.get('nearest_train_SMILES')}`")
-
-                        if "nearest_train_Label" in top20_df.columns:
-                            st.write(f"**Nearest training-set label:** {row.get('nearest_train_Label')}")
-
-        except Exception as e:
-            st.error(f"Failed to read Top 20 file: {e}")
-
-    else:
-        st.info(
-            f"Top 20 file was not detected. Please place top20_toxic.csv at: {TOP20_PATH}"
+        st.download_button(
+            label="Download batch prediction results",
+            data=dataframe_to_csv_download(result_df),
+            file_name="batch_prediction_results.csv",
+            mime="text/csv"
         )
 
 
-# =========================================================
-# 10. About
-# =========================================================
-elif page == "About":
+# ============================================================
+# 14. Page: Applicability Domain
+# ============================================================
 
+elif page == "Applicability Domain":
+    st.title("Applicability Domain Analysis")
+
+    info_panel(
+        f"""
+        The applicability domain is defined using <b>Morgan fingerprint-based Tanimoto
+        nearest-neighbor similarity</b>. For each training molecule, its nearest-neighbor
+        similarity within the training set is calculated. The 5th percentile of these
+        values is used as the AD cutoff. In this version, the cutoff is
+        <b>{ad_cutoff:.4f}</b>.
+        """,
+        "info"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("AD cutoff", f"{ad_cutoff:.4f}", "Morgan-Tanimoto similarity cutoff.", "amber")
+    with c2:
+        metric_card("Test inside AD", f"{test_result['Inside_AD'].mean() * 100:.1f}%", "Coverage of the held-out test set.", "green")
+    with c3:
+        metric_card("Inside AD molecules", int(test_result["Inside_AD"].sum()), "Test molecules inside AD.", "green")
+    with c4:
+        metric_card("Outside AD molecules", int((~test_result["Inside_AD"]).sum()), "Test molecules outside AD.", "amber")
+
+    section_title("AD Cutoff Distribution")
+
+    left, right = st.columns([1.15, 1.0])
+
+    with left:
+        st.pyplot(plot_ad_distribution(train_nn, ad_cutoff))
+
+    with right:
+        st.pyplot(plot_risk_histogram(test_result))
+
+    section_title("Performance by AD Subset")
+
+    inside = test_result[test_result["Inside_AD"] == True]
+    outside = test_result[test_result["Inside_AD"] == False]
+
+    perf_rows = []
+
+    for name, sub in [
+        ("All test set", test_result),
+        ("Inside AD", inside),
+        ("Outside AD", outside),
+    ]:
+        if len(sub) > 2 and sub["Label"].nunique() == 2:
+            sub_metrics, _ = calculate_metrics(
+                sub["Label"].values,
+                sub["Toxicity_Risk_Score"].values
+            )
+
+            perf_rows.append({
+                "Subset": name,
+                "N": len(sub),
+                "ROC-AUC": sub_metrics["ROC-AUC"],
+                "PR-AUC": sub_metrics["PR-AUC"],
+                "ACC": sub_metrics["ACC"],
+                "MCC": sub_metrics["MCC"],
+                "F1": sub_metrics["F1"],
+                "Sensitivity": sub_metrics["SE"],
+                "Specificity": sub_metrics["SP"],
+            })
+        else:
+            perf_rows.append({
+                "Subset": name,
+                "N": len(sub),
+                "ROC-AUC": np.nan,
+                "PR-AUC": np.nan,
+                "ACC": np.nan,
+                "MCC": np.nan,
+                "F1": np.nan,
+                "Sensitivity": np.nan,
+                "Specificity": np.nan,
+            })
+
+    perf_df = pd.DataFrame(perf_rows)
+    st.dataframe(perf_df, use_container_width=True)
+
+    st.download_button(
+        label="Download AD performance table",
+        data=dataframe_to_csv_download(perf_df),
+        file_name="ad_subset_performance.csv",
+        mime="text/csv"
+    )
+
+    section_title("Test-set AD Results")
+
+    show_cols = [
+        "SMILES",
+        "Label",
+        "Toxicity_Risk_Score",
+        "Predicted_Class",
+        "Nearest_Tanimoto",
+        "Inside_AD",
+        "AD_Status",
+    ]
+
+    st.dataframe(test_result[show_cols], use_container_width=True)
+
+    st.download_button(
+        label="Download test-set AD predictions",
+        data=dataframe_to_csv_download(test_result),
+        file_name="test_set_ad_predictions.csv",
+        mime="text/csv"
+    )
+
+
+# ============================================================
+# 15. Page: High-Risk Molecules
+# ============================================================
+
+elif page == "High-Risk Molecules":
+    st.title("Representative High-Risk Molecules")
+
+    info_panel(
+        """
+        Molecules are ranked by MorganFP-RF toxicity risk score. By default, this page
+        prioritizes molecules predicted as toxic and located inside the applicability
+        domain.
+        """,
+        "info"
+    )
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+
+    with c1:
+        only_inside = st.checkbox("Inside AD only", value=True)
+
+    with c2:
+        only_pred_toxic = st.checkbox("Predicted toxic only", value=True)
+
+    with c3:
+        top_n = st.slider("Number of molecules to show", min_value=5, max_value=100, value=20, step=5)
+
+    df = test_result.copy()
+
+    if only_inside:
+        df = df[df["Inside_AD"] == True]
+
+    if only_pred_toxic:
+        df = df[df["Predicted_Label"] == 1]
+
+    df = df.sort_values("Toxicity_Risk_Score", ascending=False).head(top_n)
+
+    section_title("High-Risk Molecule Table")
+
+    show_cols = [
+        "SMILES",
+        "Label",
+        "Toxicity_Risk_Score",
+        "Predicted_Class",
+        "Nearest_Tanimoto",
+        "AD_Status"
+    ]
+
+    st.dataframe(df[show_cols], use_container_width=True)
+
+    st.download_button(
+        label="Download high-risk molecule table",
+        data=dataframe_to_csv_download(df),
+        file_name="high_risk_molecules.csv",
+        mime="text/csv"
+    )
+
+    section_title("Molecular Structures")
+
+    if len(df) == 0:
+        st.info("No molecules match the selected filters.")
+    else:
+        cols = st.columns(4)
+
+        for i, (_, row) in enumerate(df.head(12).iterrows()):
+            mol = Chem.MolFromSmiles(row["SMILES"])
+
+            if mol is None:
+                continue
+
+            img = Draw.MolToImage(mol, size=(260, 200))
+
+            with cols[i % 4]:
+                st.image(img)
+                st.caption(
+                    f"Risk score: {row['Toxicity_Risk_Score']:.3f} | "
+                    f"AD: {row['AD_Status']}"
+                )
+
+
+# ============================================================
+# 16. Page: Model Details
+# ============================================================
+
+elif page == "Model Details":
+    st.title("Model Details")
+
+    section_title("Model Configuration")
+
+    config_df = pd.DataFrame([
+        {"Item": "Prediction model", "Value": "MorganFP-RF"},
+        {"Item": "Molecular representation", "Value": f"Morgan fingerprint, radius={MORGAN_RADIUS}, nBits={MORGAN_NBITS}"},
+        {"Item": "Classifier", "Value": "Random Forest"},
+        {"Item": "Number of trees", "Value": "500"},
+        {"Item": "Class weighting", "Value": "balanced"},
+        {"Item": "Decision threshold", "Value": f"{PREDICTION_THRESHOLD:.2f}"},
+        {"Item": "AD method", "Value": "Morgan-Tanimoto nearest-neighbor similarity"},
+        {"Item": "AD cutoff", "Value": f"{ad_cutoff:.4f}"},
+    ])
+
+    st.dataframe(config_df, use_container_width=True)
+
+    section_title("Complete Test Metrics")
+
+    metrics_df = pd.DataFrame([
+        {"Metric": "ROC-AUC", "Value": metrics["ROC-AUC"]},
+        {"Metric": "PR-AUC", "Value": metrics["PR-AUC"]},
+        {"Metric": "Accuracy", "Value": metrics["ACC"]},
+        {"Metric": "MCC", "Value": metrics["MCC"]},
+        {"Metric": "F1", "Value": metrics["F1"]},
+        {"Metric": "Precision", "Value": metrics["Precision"]},
+        {"Metric": "Sensitivity / Recall", "Value": metrics["SE"]},
+        {"Metric": "Specificity", "Value": metrics["SP"]},
+        {"Metric": "Threshold", "Value": metrics["Threshold"]},
+        {"Metric": "TN", "Value": metrics["TN"]},
+        {"Metric": "FP", "Value": metrics["FP"]},
+        {"Metric": "FN", "Value": metrics["FN"]},
+        {"Metric": "TP", "Value": metrics["TP"]},
+    ])
+
+    st.dataframe(metrics_df, use_container_width=True)
+
+    st.download_button(
+        label="Download complete model metrics",
+        data=dataframe_to_csv_download(metrics_df),
+        file_name="morganfp_rf_model_metrics.csv",
+        mime="text/csv"
+    )
+
+    section_title("Performance Figures")
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        st.pyplot(plot_roc(y_test, test_prob))
+    with f2:
+        st.pyplot(plot_pr(y_test, test_prob))
+    with f3:
+        st.pyplot(plot_cm(metrics))
+
+    section_title("File Paths")
+
+    st.code(
+        f"""
+Application directory:
+{APP_DIR}
+
+Training file:
+{TRAIN_FILE}
+
+Test file:
+{TEST_FILE}
+
+Model file:
+{MODEL_FILE}
+
+Metrics file:
+{METRICS_FILE}
+
+Test prediction file:
+{TEST_PRED_FILE}
+
+AD summary file:
+{AD_SUMMARY_FILE}
+        """,
+        language="text"
+    )
+
+
+# ============================================================
+# 17. Page: About
+# ============================================================
+
+elif page == "About":
     st.title("About VascTox")
+
+    info_panel(
+        """
+        VascTox is intended for research-stage small-molecule vascular toxicity risk
+        prediction and compound prioritization. It is not a substitute for experimental,
+        clinical, or regulatory safety evaluation.
+        """,
+        "info"
+    )
+
+    section_title("Current Version")
+
+    st.markdown(
+        f"""
+**{APP_VERSION}** uses a **MorganFP-RF** classifier.
+
+- Molecular representation: Morgan fingerprint
+- Radius: {MORGAN_RADIUS}
+- Fingerprint length: {MORGAN_NBITS}
+- Classifier: Random Forest
+- Decision threshold: {PREDICTION_THRESHOLD:.2f}
+- Applicability domain: Morgan-Tanimoto nearest-neighbor similarity
+- Training molecules: {len(train_df)}
+- Test molecules: {len(test_df)}
+"""
+    )
+
+    section_title("Output Interpretation")
 
     st.markdown(
         """
-        **VascTox** is a prototype web platform for vascular toxicity prediction.
+The platform reports a **toxicity risk score**. This value should be interpreted as
+a model-derived risk score rather than direct experimental toxicity evidence.
 
-        The current version includes:
+Predictions should be interpreted together with the applicability domain status:
 
-        1. Single-molecule SMILES prediction;
-        2. Batch SMILES prediction;
-        3. Descriptors-RF vascular toxicity classification;
-        4. Morgan-Tanimoto applicability domain assessment;
-        5. Molecular structure visualization;
-        6. Representative high-risk molecule display.
-        """
+- **Inside AD**: the molecule is sufficiently similar to at least one training molecule
+  according to Morgan-Tanimoto similarity.
+- **Outside AD**: the molecule is less well covered by the training chemical space;
+  prediction reliability may be lower.
+"""
     )
 
-    st.markdown("### Current Model Settings")
+    section_title("Limitations")
 
-    st.code(
-        f"""
-Prediction model:
-    Descriptors-RF
-
-Input features:
-    RDKit molecular descriptors
-
-Model file:
-    {MODEL_PATH}
-
-Classification threshold:
-    0.5
-
-Positive class:
-    Label = 1, vascular toxicant under the single 10 µM criterion
+    info_panel(
         """
-    )
-
-    st.markdown("### Current AD Settings")
-
-    ad_threshold = get_ad_threshold()
-
-    st.code(
-        f"""
-Morgan fingerprint:
-    radius = 2
-    nBits = 2048
-
-AD threshold:
-    {ad_threshold:.6f}
-
-Inside AD:
-    AD_max_Tanimoto >= {ad_threshold:.6f}
-
-Outside AD:
-    AD_max_Tanimoto < {ad_threshold:.6f}
-        """
+        The model is optimized for research screening and prioritization. It should not
+        be used as clinical, regulatory, or experimental safety evidence. Predictions
+        outside the applicability domain should be interpreted cautiously.
+        """,
+        "warning"
     )
