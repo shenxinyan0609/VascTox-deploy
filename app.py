@@ -7,6 +7,7 @@
 import os
 import io
 import warnings
+import textwrap
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -1076,7 +1077,7 @@ elif page == "Single Prediction":
             if result["Predicted_Label"] == 1 and result["Inside_AD"]:
                 info_panel(
                     """
-                    The molecule is predicted as <b>toxic</b> and is <b>inside</b> the
+                    The molecule is predicted as toxic and is inside the
                     applicability domain. This result may be prioritized for further
                     experimental or literature validation.
                     """,
@@ -1085,7 +1086,7 @@ elif page == "Single Prediction":
             elif result["Predicted_Label"] == 1 and not result["Inside_AD"]:
                 info_panel(
                     """
-                    The molecule is predicted as <b>toxic</b>, but it is <b>outside</b>
+                    The molecule is predicted as toxic, but it is outside
                     the applicability domain. Interpret the risk score cautiously.
                     """,
                     "warning"
@@ -1093,7 +1094,7 @@ elif page == "Single Prediction":
             elif result["Predicted_Label"] == 0 and result["Inside_AD"]:
                 info_panel(
                     """
-                    The molecule is predicted as <b>non-toxic</b> and is <b>inside</b>
+                    The molecule is predicted as non-toxic and is inside
                     the applicability domain.
                     """,
                     "success"
@@ -1101,7 +1102,7 @@ elif page == "Single Prediction":
             else:
                 info_panel(
                     """
-                    The molecule is predicted as <b>non-toxic</b>, but it is <b>outside</b>
+                    The molecule is predicted as non-toxic, but it is outside
                     the applicability domain. Interpret the prediction cautiously.
                     """,
                     "info"
@@ -1251,11 +1252,11 @@ elif page == "Applicability Domain":
 
     info_panel(
         f"""
-        The applicability domain is defined using <b>Morgan fingerprint-based Tanimoto
-        nearest-neighbor similarity</b>. For each training molecule, its nearest-neighbor
+        The applicability domain is defined using Morgan fingerprint-based Tanimoto
+        nearest-neighbor similarity. For each training molecule, its nearest-neighbor
         similarity within the training set is calculated. The 5th percentile of these
         values is used as the AD cutoff. In this version, the cutoff is
-        <b>{ad_cutoff:.4f}</b>.
+        {ad_cutoff:.4f}.
         """,
         "info"
     )
@@ -1493,34 +1494,7 @@ elif page == "Model Details":
     with f3:
         st.pyplot(plot_cm(metrics))
 
-    section_title("File Paths")
-
-    st.code(
-        f"""
-Application directory:
-{APP_DIR}
-
-Training file:
-{TRAIN_FILE}
-
-Test file:
-{TEST_FILE}
-
-Model file:
-{MODEL_FILE}
-
-Metrics file:
-{METRICS_FILE}
-
-Test prediction file:
-{TEST_PRED_FILE}
-
-AD summary file:
-{AD_SUMMARY_FILE}
-        """,
-        language="text"
-    )
-
+    
 
 # ============================================================
 # 17. Page: About
