@@ -121,8 +121,8 @@ section[data-testid="stSidebar"] h3 {
 
 /* Hero */
 .hero-card {
-    padding: 34px 38px;
-    border-radius: 28px;
+    padding: 30px 36px;
+    border-radius: 24px;
     background: linear-gradient(135deg, #0f766e 0%, #0f4c81 55%, #111827 100%);
     color: white;
     box-shadow: 0 20px 50px rgba(15, 76, 129, 0.20);
@@ -175,30 +175,41 @@ section[data-testid="stSidebar"] h3 {
     background: #ffffff;
     border: 1px solid #e5edf5;
     box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
-    min-height: 126px;
+    height: 142px;
+    min-height: 142px;
+    max-height: 142px;
     margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    overflow: hidden;
 }
 
 .metric-card .label {
     color: #64748b;
     font-size: 0.88rem;
     font-weight: 650;
-    margin-bottom: 8px;
+    margin-bottom: 4px;
+    white-space: normal;
 }
 
 .metric-card .value {
     color: #0f172a;
-    font-size: 2.05rem;
+    font-size: 2.0rem;
     font-weight: 800;
     line-height: 1.05;
     letter-spacing: -0.035em;
 }
 
 .metric-card .note {
-    margin-top: 10px;
+    margin-top: 6px;
     color: #64748b;
-    font-size: 0.82rem;
-    line-height: 1.35;
+    font-size: 0.80rem;
+    line-height: 1.28;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .metric-card.blue {
@@ -223,12 +234,12 @@ section[data-testid="stSidebar"] h3 {
 
 /* Section titles */
 .section-title {
-    margin-top: 34px;
-    margin-bottom: 16px;
+    margin-top: 30px;
+    margin-bottom: 14px;
 }
 
 .section-title h3 {
-    font-size: 1.45rem;
+    font-size: 1.42rem;
     font-weight: 780;
     color: #0f172a;
     margin-bottom: 4px;
@@ -237,7 +248,7 @@ section[data-testid="stSidebar"] h3 {
 .section-title p {
     color: #64748b;
     margin-top: 0;
-    font-size: 0.96rem;
+    font-size: 0.95rem;
 }
 
 /* Workflow */
@@ -931,13 +942,13 @@ if page == "Overview":
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        metric_card("Training molecules", f"{len(train_df)}", "Used to train the MorganFP-RF model.", "blue")
+        metric_card("Training molecules", f"{len(train_df)}", "Model training set.", "blue")
     with c2:
-        metric_card("Test molecules", f"{len(test_df)}", "Held-out test set for model evaluation.", "blue")
+        metric_card("Test molecules", f"{len(test_df)}", "Held-out evaluation set.", "blue")
     with c3:
-        metric_card("AD cutoff", f"{ad_cutoff:.4f}", "5th percentile of training nearest-neighbor Tanimoto similarity.", "amber")
+        metric_card("AD cutoff", f"{ad_cutoff:.4f}", "Morgan-Tanimoto threshold.", "amber")
     with c4:
-        metric_card("Test molecules inside AD", f"{test_result['Inside_AD'].mean() * 100:.1f}%", "Fraction of test molecules covered by the training chemical space.", "green")
+        metric_card("Test inside AD", f"{test_result['Inside_AD'].mean() * 100:.1f}%", "Coverage of test molecules.", "green")
 
     section_title(
         "Held-out Test Performance",
@@ -946,13 +957,13 @@ if page == "Overview":
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        metric_card("ROC-AUC", f"{metrics['ROC-AUC']:.4f}", "Overall ranking ability.", "green")
+       metric_card("ROC-AUC", f"{metrics['ROC-AUC']:.4f}", "Overall discrimination.", "green")
     with m2:
-        metric_card("PR-AUC", f"{metrics['PR-AUC']:.4f}", "Toxic-class focused performance.", "green")
+        metric_card("PR-AUC", f"{metrics['PR-AUC']:.4f}", "Toxic-class performance.", "green")
     with m3:
-        metric_card("MCC", f"{metrics['MCC']:.4f}", "Balanced binary-classification quality.", "green")
+        metric_card("MCC", f"{metrics['MCC']:.4f}", "Balanced classification.", "green")
     with m4:
-        metric_card("F1 score", f"{metrics['F1']:.4f}", "Balance between precision and recall.", "blue")
+        metric_card("F1 score", f"{metrics['F1']:.4f}", "Precision-recall balance.", "blue")
 
     with st.expander("Show detailed metrics"):
         detail_df = pd.DataFrame([
