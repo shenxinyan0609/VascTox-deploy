@@ -1,8 +1,8 @@
 # app.py
 # VascTox: Vascular Toxicity Prediction Platform
 # Final deployed model: MorganFP-RF
-# Feature: Morgan fingerprint, radius=2, nBits=2048
-# AD: Morgan fingerprint-based Tanimoto nearest-neighbor similarity
+# Prediction feature: Morgan fingerprint, radius=2, nBits=1024
+# AD feature: Morgan fingerprint, radius=2, nBits=2048; cutoff=0.3750
 
 import os
 import io
@@ -57,7 +57,7 @@ st.set_page_config(
 # ============================================================
 
 APP_TITLE = "VascTox"
-APP_VERSION = "VascTox v1.0"
+APP_VERSION = "VascTox v1.1 (final-model aligned)"
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -75,14 +75,16 @@ TEST_FILE = TEST_FILE_DATA if TEST_FILE_DATA.exists() else TEST_FILE_ROOT
 MODEL_DIR = APP_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_FILE = MODEL_DIR / "morganfp_rf_model.joblib"
+MODEL_FILE = MODEL_DIR / "morganfp1024_rf_model_final.jobli"
 METRICS_FILE = MODEL_DIR / "morganfp_rf_test_metrics.csv"
 TEST_PRED_FILE = MODEL_DIR / "morganfp_rf_test_predictions.csv"
 AD_SUMMARY_FILE = MODEL_DIR / "morgan_tanimoto_ad_summary.csv"
 
 RANDOM_STATE = 42
 MORGAN_RADIUS = 2
-MORGAN_NBITS = 2048
+MORGAN_NBITS = 1024
+AD_NBITS = 2048
+AD_CUTOFF = 0.3750
 PREDICTION_THRESHOLD = 0.50
 
 # 如果你想强制重新训练模型，把这里改成 True
@@ -557,12 +559,15 @@ def compute_train_nn_distribution(train_fps):
 
 def compute_ad_cutoff(train_fps):
     train_nn = compute_train_nn_distribution(train_fps)
-    cutoff = float(np.percentile(train_nn, 5))
-    return cutoff, train_nn
+    return AD_CUTOFF, train_nn
 
 
 def assess_ad(smiles, train_fps, cutoff):
-    fp = smiles_to_morgan_fp_bitvect(smiles)
+    fp = smiles_to_morgan_fp_bitvect(
+        smiles,
+        radius=MORGAN_RADIUS,
+        nbits=AD_NBITS
+    )
 
     if fp is None:
         return {
@@ -588,8 +593,11 @@ def assess_ad(smiles, train_fps, cutoff):
 
 def train_morgan_rf(X_train, y_train):
     model = RandomForestClassifier(
-        n_estimators=500,
-        max_features="sqrt",
+        n_estimators=200,
+        criterion="entropy",
+        max_depth=None,
+        min_samples_leaf=1,
+        max_features="log2",
         class_weight="balanced",
         random_state=RANDOM_STATE,
         n_jobs=-1
@@ -598,7 +606,6 @@ def train_morgan_rf(X_train, y_train):
     model.fit(X_train, y_train)
 
     return model
-
 
 def calculate_metrics(y_true, y_prob, threshold=PREDICTION_THRESHOLD):
     y_pred = (y_prob >= threshold).astype(int)
@@ -642,9 +649,13 @@ def load_all_resources():
     y_test = test_df["Label"].values
 
     train_fps = [
-        smiles_to_morgan_fp_bitvect(smi)
-        for smi in train_df["SMILES"].tolist()
-    ]
+    smiles_to_morgan_fp_bitvect(
+        smi,
+        radius=MORGAN_RADIUS,
+        nbits=AD_NBITS
+    )
+    for smi in train_df["SMILES"].tolist()
+]
     train_fps = [fp for fp in train_fps if fp is not None]
 
     if FORCE_RETRAIN or (not MODEL_FILE.exists()):
@@ -897,7 +908,9 @@ st.sidebar.markdown(
 **Input features:** Morgan fingerprints  
 radius = {MORGAN_RADIUS}, nBits = {MORGAN_NBITS}
 
-**AD method:** Morgan-Tanimoto nearest-neighbor similarity
+**AD fingerprint:** Morgan radius = {MORGAN_RADIUS}, nBits = {AD_NBITS}  
+**AD method:** Morgan-Tanimoto nearest-neighbor similarity  
+**AD cutoff:** {AD_CUTOFF:.4f}
 """
 )
 
@@ -1252,11 +1265,9 @@ elif page == "Applicability Domain":
 
     info_panel(
         f"""
-        The applicability domain is defined using Morgan fingerprint-based Tanimoto
-        nearest-neighbor similarity. For each training molecule, its nearest-neighbor
-        similarity within the training set is calculated. The 5th percentile of these
-        values is used as the AD cutoff. In this version, the cutoff is
-        {ad_cutoff:.4f}.
+        The applicability domain is defined using 2048-bit Morgan fingerprint-based
+        Tanimoto nearest-neighbor similarity. This deployed version uses the final
+        study cutoff of {ad_cutoff:.4f}, consistent with the manuscript analysis.
         """,
         "info"
     )
@@ -1448,7 +1459,7 @@ elif page == "Model Details":
         {"Item": "Prediction model", "Value": "MorganFP-RF"},
         {"Item": "Molecular representation", "Value": f"Morgan fingerprint, radius={MORGAN_RADIUS}, nBits={MORGAN_NBITS}"},
         {"Item": "Classifier", "Value": "Random Forest"},
-        {"Item": "Number of trees", "Value": "500"},
+        {"Item": "Number of trees", "Value": "200"},
         {"Item": "Class weighting", "Value": "balanced"},
         {"Item": "Decision threshold", "Value": f"{PREDICTION_THRESHOLD:.2f}"},
         {"Item": "AD method", "Value": "Morgan-Tanimoto nearest-neighbor similarity"},
